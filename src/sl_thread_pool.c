@@ -311,11 +311,7 @@ malloc_pool_err:
 *********************************************************************************************************
 */
 void sl_thread_pool_destory_now(struct sl_thread_pool *pool)
-{
-    struct list_head *plh = NULL;
-    struct sl_thread *pst = NULL;
-    struct sl_thread_task *pstt = NULL;
-    
+{   
     if (pool != NULL) {
 
         pool->destory = 1;
@@ -346,11 +342,7 @@ void sl_thread_pool_destory_now(struct sl_thread_pool *pool)
 *********************************************************************************************************
 */
 void sl_thread_pool_destory(struct sl_thread_pool *pool)
-{
-    struct list_head *plh = NULL;
-    struct sl_thread *pst = NULL;
-    struct sl_thread_task *pstt = NULL;
-    
+{   
     if (pool != NULL) {
 
         sl_update_pool_destory_info();
@@ -576,17 +568,17 @@ static int sl_threads_destory(struct sl_thread_pool *pool)
 */
 static void sl_manager_destory(struct sl_thread *thread)
 {
-    struct sl_thread *pst = NULL;
+    struct sl_thread *pst = thread;
 
-    if (thread == NULL) {
+    if (pst == NULL) {
         ERR("%s: thread is NULL", __FUNCTION__);
         return ;
     }
 
-    thread->thread_status = THREAD_QUIT;
+    pst->thread_status = THREAD_QUIT;
     wake("W");
-    pthread_join(thread->thread_id, NULL);
-    free(thread);
+    pthread_join(pst->thread_id, NULL);
+    free(pst);
 }
 
 /*
@@ -664,7 +656,6 @@ static int poll_event(struct sl_thread_pool *pool, int time_out)
     uint32_t epoll_events = 0;
     type_event ret_event;
     int keep_time = -1;
-    int ret = -1;
 
     if (pstp == NULL) {
         ERR("%s: pool is NULL", __FUNCTION__);
@@ -965,6 +956,8 @@ static void *sl_thread_manager_do(void *arg)
         next_poll_time = get_next_poll_time(keep_alive_time);
     }
     INFO("sl_thread_manager_do quit");
+
+    return NULL;
 }
 
 
@@ -981,7 +974,6 @@ static void *sl_thread_do(void *arg)
     struct sl_thread_pool *pstp = (struct sl_thread_pool *)arg;
     struct sl_thread_task *pstt = NULL;
     struct sl_task_queue  *pstq = NULL;
-    struct sl_thread      *pst  = NULL;
     
     if (pstp == NULL) {
         ERR("%s: pool is NULL", __FUNCTION__);

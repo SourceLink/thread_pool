@@ -17,6 +17,8 @@ void *fun1(void * arg)
         printf("I will runing count = %d\n", count);
         sleep(1);
     }
+
+    return NULL;
 }
 
 
