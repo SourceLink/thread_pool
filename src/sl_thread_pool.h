@@ -59,12 +59,12 @@ struct sl_thread_pool {
 
 /* 
     desc: 初始化线程池
-    min_td_num: 初始化线程数
+    core_td_num: 初始化线程数
     max_td_num: 最大线程数目,线程数量是动态分配
     queue_size: 任务对列的数目
     return: 返回线程池句柄
 */
-struct sl_thread_pool *sl_thread_pool_create(unsigned int min_td_num, unsigned int max_td_num, int alive_time);
+struct sl_thread_pool *sl_thread_pool_create(unsigned int core_td_num, unsigned int max_td_num, int alive_time);
 void sl_thread_pool_destory(struct sl_thread_pool *pool);
 void sl_thread_pool_destory_now(struct sl_thread_pool *pool);
 int sl_thread_pool_push_task(struct sl_thread_pool *pool, void *(*task_fun)(void *arg), void *arg);
