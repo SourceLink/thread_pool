@@ -1,12 +1,3 @@
----
-layout: post
-title:  "线程池的C实现"
-date:   2019-01-02
-catalog:  true
-tags:
-    - thread pool
----
-
 
 # 一. 概述
 
