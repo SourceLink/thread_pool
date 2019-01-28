@@ -11,6 +11,7 @@
 
 #include "sl_thread_pool.h"
 #include "sl_debug.h"
+#include "sl_message_queue.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -19,7 +20,7 @@
 #include <sys/epoll.h>
 #include <string.h>
 
-DEBUG_SET_LEVEL(DEBUG_LEVEL_DEBUG);
+DEBUG_SET_LEVEL(DEBUG_LEVEL_ERR);
 
 
 
@@ -32,6 +33,7 @@ const char *get_status(int sta)
        NAME(THREAD_SUPPEND);
        NAME(THREAD_RUNING);
        NAME(THREAD_WORKING);
+       NAME(THREAD_QUIT);
        
        default: return "???";
     }
@@ -44,10 +46,6 @@ const char *get_status(int sta)
 
 #define EPOLL_SIZE_HINT  8
 #define EPOLL_MAX_EVENTS 16
-
-#define THREAD_STATUS       "S"
-#define TASK_QUEUE_INFO     "I"
-#define POOL_DESTORY        "D"
 
 static pthread_key_t g_key;
 static int g_epoll_fd = -1;
@@ -71,7 +69,8 @@ static type_event sl_get_event(void);
 static int get_next_poll_time(int _keep_time);
 static void sl_update_pool_destory_info(void);
 
-static void wake(const char *info);
+static void wake(void);
+static void awoken(void);
 
 static void destructor_fun(void *arg)
 {
@@ -173,7 +172,11 @@ static void wait_task_signal(struct sl_task_queue *_stq)
         pthread_mutex_lock(&pstq->task_mutex);
         while (list_empty(&pstq->task_head) && sl_get_thread_self()->thread_status != THREAD_QUIT) {
             sl_update_thread_status(THREAD_SUPPEND);
+            /* 此时manager thread可能会检测到该线程挂起状态, 并发出退出命令
+               而该线程可能还为进入wait状态
+             */
             pthread_cond_wait(&pstq->task_ready_signal, &pstq->task_mutex);
+            DEBUG("%s: thread id = %ld, thread status = %s",  __FUNCTION__, pthread_self(), get_status(sl_get_thread_self()->thread_status));
         }
         if (sl_get_thread_self()->thread_status != THREAD_QUIT) {
             sl_update_thread_status(THREAD_RUNING);
@@ -222,7 +225,7 @@ static void sl_notify_all(struct sl_task_queue *_stq)
 *********************************************************************************************************
 *    函 数 名: sl_thread_pool_create
 *    功能说明: 创建线程池
-*    形    参: core_td_num:初始化线程数    max_td_num:最大线程数目,线程数量是动态分配    queue_size:任务对列的数目 
+*    形    参: core_td_num:初始化线程数    max_td_num:最大线程数目,线程数量是动态分配    alive_time:单位ms 
 *    返 回 值: 返回创建好的线程池对象
 *********************************************************************************************************
 */
@@ -231,6 +234,9 @@ struct sl_thread_pool *sl_thread_pool_create(unsigned int core_td_num, unsigned 
     struct sl_thread_pool *pstp = NULL;
     struct sl_thread    *thread = NULL;
     int create_ret = -1;
+
+    sl_queue_create();
+
     pstp = (struct sl_thread_pool*)malloc(sizeof(struct sl_thread_pool));
     if (pstp == NULL) {
         ERR("%s: malloc error for creat pool", __FUNCTION__);
@@ -324,6 +330,9 @@ void sl_thread_pool_destory_now(struct sl_thread_pool *pool)
         /* manager注销 */
         sl_manager_destory(pool->thread_manager);
 
+        /* 注销消息队列 */
+        sl_queue_destory();
+
         pthread_mutex_destroy(&pool->thread_mutex);
         /* 注销工作锁 */
         pthread_mutex_destroy(&pool->task_queue.task_mutex);
@@ -342,7 +351,7 @@ void sl_thread_pool_destory_now(struct sl_thread_pool *pool)
 *********************************************************************************************************
 */
 void sl_thread_pool_destory(struct sl_thread_pool *pool)
-{   
+{
     if (pool != NULL) {
 
         sl_update_pool_destory_info();
@@ -357,6 +366,9 @@ void sl_thread_pool_destory(struct sl_thread_pool *pool)
         /* manager注销 */
         sl_manager_destory(pool->thread_manager);
 
+        /* 注销消息队列 */
+        sl_queue_destory();
+
         pthread_mutex_destroy(&pool->thread_mutex);
         /* 注销工作锁 */
         pthread_mutex_destroy(&pool->task_queue.task_mutex);
@@ -368,7 +380,7 @@ void sl_thread_pool_destory(struct sl_thread_pool *pool)
 /*
 *********************************************************************************************************
 *    函 数 名: sl_thread_pool_push_task
-*    功能说明:  向线程池添加一个任务 
+*    功能说明:  向线程池添加一个任务
 *    形    参: 无
 *    返 回 值: 返回当前任务链表中的任务数量
 *********************************************************************************************************
@@ -381,11 +393,11 @@ int sl_thread_pool_push_task(struct sl_thread_pool *pool, void *(*task_fun)(void
     if (pool == NULL || task_fun == NULL || pool->destory == 1) {
         ERR("%s: pool or task_fun is NULL or is destory status", __FUNCTION__);
         return -1;
-    }  
+    }
 
     pstq = &pool->task_queue;
 
-    pstt = (struct sl_thread_task*)malloc(sizeof(struct sl_thread_task));    
+    pstt = (struct sl_thread_task*)malloc(sizeof(struct sl_thread_task));
     if (pstt == NULL) {
         ERR("%s: malloc error for creat a task", __FUNCTION__);
         return -1;
@@ -401,7 +413,7 @@ int sl_thread_pool_push_task(struct sl_thread_pool *pool, void *(*task_fun)(void
 /*
 *********************************************************************************************************
 *    函 数 名: sl_task_push
-*    功能说明:  向任务链表中压入一个任务 
+*    功能说明:  向任务链表中压入一个任务
 *    形    参: 无
 *    返 回 值: 返回当前任务链表中的任务数量
 *********************************************************************************************************
@@ -414,7 +426,7 @@ static int sl_task_push(struct sl_task_queue *_stq, struct sl_thread_task *new_t
     if (pstq == NULL || pstt == NULL) {
         ERR("%s: pstq or pstt is NULL", __FUNCTION__);
         return -1;
-    }  
+    }
 
     pthread_mutex_lock(&pstq->task_mutex);
     list_add(&pstq->task_head, &pstt->task_list);
@@ -447,14 +459,16 @@ static struct sl_thread_task *sl_task_pull(struct sl_task_queue *_stq)
 
     wait_task_signal(pstq);
 
-    pthread_mutex_lock(&pstq->task_mutex);
-    list_for_each(plh, &pstq->task_head) {
-        pstt = sl_list_entry(plh, struct sl_thread_task, task_list);
-        list_delete(plh);
-        pstq->num_tasks_alive--;
-        break;
+    if (sl_get_thread_self()->thread_status != THREAD_QUIT) {
+        pthread_mutex_lock(&pstq->task_mutex);
+        list_for_each(plh, &pstq->task_head) {
+            pstt = sl_list_entry(plh, struct sl_thread_task, task_list);
+            list_delete(plh);
+            pstq->num_tasks_alive--;
+            break;
+        }
+        pthread_mutex_unlock(&pstq->task_mutex);
     }
-    pthread_mutex_unlock(&pstq->task_mutex);
 
     return pstt;
 }
@@ -478,10 +492,10 @@ static int sl_task_queue_clear(struct sl_task_queue *_stq)
         ERR("%s: pstq is NULL", __FUNCTION__);
         return -1;
     }
-    
+
     /* 释放工作队列 */
     pthread_mutex_lock(&pstq->task_mutex);
-    list_for_each(plh, &pstq->task_head) { 
+    list_for_each(plh, &pstq->task_head) {
         pstt = sl_list_entry(plh, struct sl_thread_task, task_list);
         delete_when_each(plh);
         free(pstt);
@@ -546,7 +560,7 @@ static int sl_threads_destory(struct sl_thread_pool *pool)
         return -1;
     }
 
-    list_for_each(plh, &pool->thread_head) { 
+    list_for_each(plh, &pool->thread_head) {
         pst = sl_list_entry(plh, struct sl_thread, thread_list);
         delete_when_each(plh);
         pst->thread_status = THREAD_QUIT;
@@ -576,7 +590,8 @@ static void sl_manager_destory(struct sl_thread *thread)
     }
 
     pst->thread_status = THREAD_QUIT;
-    wake("W");
+    wake();
+    DEBUG("%s: wake manager thread to destory", __FUNCTION__);
     pthread_join(pst->thread_id, NULL);
     free(pst);
 }
@@ -592,7 +607,7 @@ static void sl_manager_destory(struct sl_thread *thread)
 static void create_manager_looper(struct sl_thread_pool *pool)
 {
     int wake_fds[2];
-    int result = -1; 
+    int result = -1;
 
     if (pool == NULL) {
         ERR("%s: pool is NULL", __FUNCTION__);
@@ -613,13 +628,13 @@ static void create_manager_looper(struct sl_thread_pool *pool)
         ERR("Could not make wake read pipe non-blocking.");
         return ;
     }
-        
+
     result = fcntl(g_wake_write_pip_fd, F_SETFL, O_NONBLOCK);
     if (result != 0) {
         ERR("Could not make wake read pipe non-blocking.");
         return ;
     }
-    
+
     g_epoll_fd = epoll_create(EPOLL_SIZE_HINT);
     if (g_epoll_fd < 0) {
         ERR("%s: Could not create epoll instance.", __FUNCTION__);
@@ -627,7 +642,7 @@ static void create_manager_looper(struct sl_thread_pool *pool)
     }
 
     struct epoll_event eventItem;
-    memset(&eventItem, 0, sizeof(struct epoll_event)); 
+    memset(&eventItem, 0, sizeof(struct epoll_event));
     eventItem.events = EPOLLIN;
     eventItem.data.fd = g_wake_read_pip_fd;
     result = epoll_ctl(g_epoll_fd, EPOLL_CTL_ADD, g_wake_read_pip_fd, &eventItem);
@@ -650,12 +665,17 @@ static int poll_event(struct sl_thread_pool *pool, int time_out)
 {
     struct sl_thread_pool *pstp = pool;
     struct list_head       *plh = NULL;
-    struct sl_task_queue  *pstq = NULL;
+    struct sl_task_queue  *pstq = &pool->task_queue;
     struct sl_thread       *pst = NULL;
     int fd = -1;
     uint32_t epoll_events = 0;
-    type_event ret_event;
+    type_event currten_event = EVENT_INIT;
+    type_event prv_event = EVENT_INIT;
     int keep_time = -1;
+
+    int alive_threads_num = 0;
+    int core_threads_num = 0;
+    int thread_status = THREAD_IDLE;
 
     if (pstp == NULL) {
         ERR("%s: pool is NULL", __FUNCTION__);
@@ -664,24 +684,36 @@ static int poll_event(struct sl_thread_pool *pool, int time_out)
 
     struct epoll_event eventItems[EPOLL_MAX_EVENTS];
     int event_count = epoll_wait(g_epoll_fd, eventItems, EPOLL_MAX_EVENTS, time_out);
-   
+     DEBUG("%s: event_count = %d",__FUNCTION__, event_count);
     // Check for poll error.
     if (event_count < 0) {
         ERR("%s: epoll_wait is error", __FUNCTION__);
         return keep_time;
     }
 
+    pstq = &pstp->task_queue;
+    alive_threads_num = pstp->alive_threads_num; 
+    core_threads_num = pstp->core_threads_num;
+
     // Check for poll timeout.
     if (event_count == 0) {
-        list_for_each(plh, &pstp->thread_head) { 
+        list_for_each(plh, &pstp->thread_head) {
             pst = sl_list_entry(plh, struct sl_thread, thread_list);
-            DEBUG("%s: pstp->alive_threads_num = %d, %ld thread status %s", __FUNCTION__, pstp->alive_threads_num, pst->thread_id, get_status(pst->thread_status));
-            if (pstp->alive_threads_num > pstp->core_threads_num) {
-                if (pst->thread_status == THREAD_SUPPEND) {
+            /* 这里加锁是为了保证线程能在更新状态后且在suppend状态下能进入wait状态 */
+            pthread_mutex_lock(&pstq->task_mutex);
+            thread_status = pst->thread_status;
+            pthread_mutex_unlock(&pstq->task_mutex);
+
+            DEBUG("%s: pstp->alive_threads_num = %d, core_threads_num = %d thread id = %ld thread status %s", 
+                __FUNCTION__, pstp->alive_threads_num, core_threads_num, pst->thread_id, get_status(thread_status));
+            if (alive_threads_num > core_threads_num) {
+                if (thread_status == THREAD_SUPPEND) {
                     pst->thread_status = THREAD_QUIT;
+                    delete_when_each(plh);
                     sl_notify_all(&pstp->task_queue);
-                    delete_when_each(plh);     
+                    DEBUG("%s: I will quit", __FUNCTION__);
                     pthread_join(pst->thread_id, NULL);
+                    DEBUG("after pthread_join");
                     free(pst);
                     keep_time = 50;  // 50ms再检测一次
                     break;
@@ -691,6 +723,17 @@ static int poll_event(struct sl_thread_pool *pool, int time_out)
                 break;
             }
         }
+        
+        #if 0
+        DEBUG("%s: will each list", __FUNCTION__);
+        list_for_each(plh, &pstp->thread_head) {
+            pst = sl_list_entry(plh, struct sl_thread, thread_list);
+            thread_status = pst->thread_status;
+            DEBUG("%s: pstp->alive_threads_num = %d, core_threads_num = %d thread id = %ld thread status %s", 
+                __FUNCTION__, pstp->alive_threads_num, core_threads_num, pst->thread_id, get_status(thread_status));
+        }
+        #endif
+
         return keep_time;
     }
 
@@ -699,42 +742,62 @@ static int poll_event(struct sl_thread_pool *pool, int time_out)
         fd = eventItems[i].data.fd;
         epoll_events = eventItems[i].events;
         if ((fd == g_wake_read_pip_fd) && (epoll_events & EPOLLIN)) {
-            /* thread和task同时来临只处理thread */
-            ret_event = sl_get_event();
-            switch(ret_event) {
-                case EVENT_THREAD:
-                    DEBUG("EVENT_THREAD");
-                    if (pstp->alive_threads_num > pstp->core_threads_num)  {
-                        keep_time = pstp->keep_alive_time;             
-                    } else {
-                        keep_time = -1;
-                    }
-                    break;
-
-                case EVENT_TASK:
-                    DEBUG("EVENT_TASK");
-                    /* 判断当前线程的消息和当前运行线程比例 */
-                    pstq = &pstp->task_queue;
-                    if(pstq->num_tasks_alive >= (pstp->alive_threads_num * 2) && (pstp->alive_threads_num <= pstp->max_threads_num)) {
-                        /* 创建线程 */
-                        pst = sl_thread_create(sl_thread_do, pstp);
-                        if (pst != NULL) {
-                            list_add(&pstp->thread_head, &pst->thread_list); 
-                            pthread_setname_np(pst->thread_id, "other_thread"); 
+            /* 将管道中的数据读取 */
+            awoken();
+            /* 循环处理消息队列中的事件 */
+            while (1) {
+                /* thread和task同时来临只处理thread */
+                currten_event = sl_get_event();
+                switch(currten_event) {
+                    case EVENT_THREAD:
+                        DEBUG("EVENT_THREAD");
+                        if (alive_threads_num > core_threads_num)  {
+                            keep_time = pstp->keep_alive_time;
+                        } else {
+                            keep_time = -1;
                         }
+                        DEBUG("EVENT_THREAD keep_time(%d)", keep_time);
+                        break;
+
+                    case EVENT_TASK:
+                        DEBUG("EVENT_TASK");
+                        /* 判断当前线程的消息和当前运行线程比例 */
+                        if(pstq->num_tasks_alive >= (alive_threads_num * 2) && (alive_threads_num <= pstp->max_threads_num)) {
+                            /* 创建线程 */
+                            pst = sl_thread_create(sl_thread_do, pstp);
+                            if (pst != NULL) {
+                                list_add(&pstp->thread_head, &pst->thread_list);
+                                pthread_setname_np(pst->thread_id, "other_thread"); 
+                            }
+                        }
+                        break;
+                    case EVENT_SHUTDOWN:
+                        DEBUG("EVENT_SHUTDOWN");
+                        /* 执行完任务对列中的任务才shutdown */
+                        pstp->core_threads_num = 0;
+                        pool->destory = 1;
+                        break;
+                    default: break;
+                }
+
+                
+                if (currten_event == EVENT_IDLE) {
+                    DEBUG("EVENT_IDLE");
+                    /* 有种情况是其他线程往管道写入数据时, 此时manager线程还在处理数据
+                       且此时消息已经挂在消息队列上,也被处理了, 但是下次管道还会继续唤醒,因为管道中有数据,但是此时消息对列已经为空了,
+                       所以下次唤醒起来后就消息队列没有数据处理;
+                    */
+                    if (currten_event == EVENT_IDLE && prv_event == EVENT_INIT) {
+                        keep_time = pstp->keep_alive_time;
                     }
                     break;
-                case EVENT_SHUTDOWN:
-                    DEBUG("EVENT_SHUTDOWN");
-                    /* 执行完任务对列中的任务才shutdown */
-                    pstp->core_threads_num = 0;
-                    pool->destory = 1;
-                    break;
-                default: break;
-            }
-        } 
+                }
+                prv_event = currten_event;
+            }   
+        }
     }
 
+    DEBUG("will quit keep_time(%d)", keep_time);
     return keep_time;
 }
 
@@ -769,7 +832,7 @@ static struct timespec get_abs_keep_alive_time(double seconds)
 *    函 数 名: get_next_poll_time
 *    功能说明: 根据keep_alive_time计算出下一轮wait时间
 *    形    参: _keep_time: 线程活动时间
-*    返 回 值: 下一轮wait时间, -1: 无限等待 0:不等待 other: 等待的具体时间 
+*    返 回 值: 下一轮wait时间, -1: 无限等待 0:不等待 other: 等待的具体时间
 *********************************************************************************************************
 */
 static int get_next_poll_time(int _keep_time)
@@ -785,7 +848,7 @@ static int get_next_poll_time(int _keep_time)
     double next_keep_time = 0;
 
     if (_keep_time == -1) {
-       s_poll_wait_time = -1; 
+       s_poll_wait_time = -1;
        memset(&s_abs_keep_time, 0, sizeof(struct timespec));
     } else {
         if (s_poll_wait_time != -1) {
@@ -821,15 +884,15 @@ static int get_next_poll_time(int _keep_time)
 *********************************************************************************************************
 *    函 数 名: wake
 *    功能说明: 唤醒manager线程
-*    形    参: info:唤醒信息
+*    形    参: none
 *    返 回 值: none
 *********************************************************************************************************
 */
-static void wake(const char *info)
+static void wake(void)
 {
     ssize_t num_write;
     do {
-        num_write = write(g_wake_write_pip_fd, info, strlen(info));
+        num_write = write(g_wake_write_pip_fd, "W", 1);
     } while (num_write == -1);
 }
 
@@ -838,26 +901,24 @@ static void wake(const char *info)
 *********************************************************************************************************
 *    函 数 名: awoken
 *    功能说明: 读取收到的消息
-*    形    参: _event: 将读取到的消息写进行该buf
+*    形    参: none
 *    返 回 值: none
 *********************************************************************************************************
 */
-static void awoken(char *_event)
+static void awoken(void)
 {
     char buffer[16];
     ssize_t num_read;
     do {
         num_read = read(g_wake_read_pip_fd, buffer, sizeof(buffer));
     } while (num_read == -1  || num_read == sizeof(buffer));
-    buffer[num_read] = '\0';
-    memcpy(_event, buffer, num_read);
 }
 
 
 /*
 *********************************************************************************************************
 *    函 数 名: sl_update_thread_status
-*    功能说明: 更新线程状态,当status为THREAD_SUPPEND时通知manager线程
+*    功能说明: 更新线程状态,当status为THREAD_SUPPEND时会通知manager线程
 *    形    参: status:线程状态值
 *    返 回 值: none
 *********************************************************************************************************
@@ -868,9 +929,18 @@ static void sl_update_thread_status(type_thread_status status)
     if (temp_status != status) {
         sl_get_thread_self()->thread_status = status;
     }
-    
+
     if (status == THREAD_SUPPEND && temp_status != status) {
-        wake(THREAD_STATUS);
+        struct sl_messgae *new_msg = (struct sl_messgae *)malloc(sizeof(struct sl_messgae));
+        if (new_msg != NULL) {
+            memset(new_msg, 0, sizeof(struct sl_messgae));
+            new_msg->type = EVENT_THREAD;
+            sl_push_msg(new_msg);
+            DEBUG("%s: will wake", __FUNCTION__);
+            wake();
+        } else {
+            ERR("%s: malloc sl_messgae", __FUNCTION__);
+        }
     }
 }
 
@@ -885,21 +955,39 @@ static void sl_update_thread_status(type_thread_status status)
 */
 static void sl_update_task_queue_info(void)
 {
-    wake(TASK_QUEUE_INFO);
+    struct sl_messgae *new_msg = (struct sl_messgae *)malloc(sizeof(struct sl_messgae));
+    if (new_msg != NULL) {
+        memset(new_msg, 0, sizeof(struct sl_messgae));
+        new_msg->type = EVENT_TASK;
+        sl_push_msg(new_msg);
+        DEBUG("%s: will wake", __FUNCTION__);
+        wake();
+    } else {
+        ERR("%s: malloc sl_messgae", __FUNCTION__);
+    }
 }
 
 
 /*
 *********************************************************************************************************
 *    函 数 名: sl_update_pool_destory_info
-*    功能说明: 
+*    功能说明:
 *    形    参: none
 *    返 回 值: none
 *********************************************************************************************************
 */
 static void sl_update_pool_destory_info(void)
 {
-    wake(POOL_DESTORY);
+    struct sl_messgae *new_msg = (struct sl_messgae *)malloc(sizeof(struct sl_messgae));
+    if (new_msg != NULL) {
+        memset(new_msg, 0, sizeof(struct sl_messgae));
+        new_msg->type = EVENT_SHUTDOWN;
+        sl_push_msg(new_msg);
+        DEBUG("%s: will wake", __FUNCTION__);
+        wake();
+    } else {
+        ERR("%s: malloc sl_messgae", __FUNCTION__);
+    }
 }
 
 /*
@@ -912,18 +1000,16 @@ static void sl_update_pool_destory_info(void)
 */
 static type_event sl_get_event(void)
 {
-    char buffer[16] = {0};
+    struct sl_messgae *out_msg = NULL;
     type_event ret_event = EVENT_IDLE;
-    awoken(buffer);
-    DEBUG("%s: buffer is %s", __FUNCTION__, buffer);
-    if (strstr(buffer, POOL_DESTORY)) {
-        ret_event = EVENT_SHUTDOWN;
-    } else if (strstr(buffer, THREAD_STATUS)) {
-        ret_event = EVENT_THREAD;
-    } else if (strstr(buffer, TASK_QUEUE_INFO)) {
-        ret_event = EVENT_TASK;
-    } 
-   
+
+    out_msg= sl_pull_msg();
+    
+    if (out_msg != NULL) {
+        ret_event = (type_event)out_msg->type;
+        free(out_msg);
+    }
+
    return  ret_event;
 }
 
@@ -939,7 +1025,7 @@ static type_event sl_get_event(void)
 static void *sl_thread_manager_do(void *arg)
 {
     struct sl_thread_pool *pstp = (struct sl_thread_pool *)arg;
-    int next_poll_time = -1; 
+    int next_poll_time = -1;
     int keep_alive_time = -1;
 
     if (pstp == NULL) {
@@ -951,9 +1037,12 @@ static void *sl_thread_manager_do(void *arg)
         usleep(100);
     } while(pstp->thread_manager == NULL);
 
+    pstp->thread_manager->thread_status = THREAD_RUNING;
+
     while (pstp->thread_manager->thread_status != THREAD_QUIT) {
         keep_alive_time = poll_event(pstp, next_poll_time);
         next_poll_time = get_next_poll_time(keep_alive_time);
+        DEBUG("pstp->thread_manager->thread_status = %d", pstp->thread_manager->thread_status);
     }
     INFO("sl_thread_manager_do quit");
 
@@ -974,7 +1063,7 @@ static void *sl_thread_do(void *arg)
     struct sl_thread_pool *pstp = (struct sl_thread_pool *)arg;
     struct sl_thread_task *pstt = NULL;
     struct sl_task_queue  *pstq = NULL;
-    
+
     if (pstp == NULL) {
         ERR("%s: pool is NULL", __FUNCTION__);
         return NULL;
@@ -988,9 +1077,9 @@ static void *sl_thread_do(void *arg)
 
     sl_save_thread_self(pstp);
 
-    while (sl_get_thread_self()->thread_status != THREAD_QUIT) {  
+    while (sl_get_thread_self()->thread_status != THREAD_QUIT) {
 
-        pstt = sl_task_pull(pstq); 
+        pstt = sl_task_pull(pstq);
         if (pstt != NULL) {
             sl_update_thread_status(THREAD_WORKING);
             pstt->task_fun(&pstt->arg);
@@ -1006,8 +1095,8 @@ static void *sl_thread_do(void *arg)
 
     sl_clear_thread_self();
 
-    INFO("thread_run_task %ld quit, currten threads count %d, currten tasks count %d\n", 
+    INFO("thread_run_task %ld quit, currten threads count %d, currten tasks count %d\n",
                     pthread_self(), pstp->alive_threads_num, pstq->num_tasks_alive);
-    
+
     return NULL;
 }

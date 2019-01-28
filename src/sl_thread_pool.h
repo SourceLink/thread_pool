@@ -29,16 +29,17 @@ typedef enum {
 } type_thread_status;
 
 typedef enum {
-    EVENT_IDLE      = 0,
-    EVENT_THREAD    = 1,
-    EVENT_TASK      = 2,
-    EVENT_SHUTDOWN  = 3
+    EVENT_INIT      = 0x1000,
+    EVENT_IDLE      = 0x1001,
+    EVENT_THREAD    = 0x2000,
+    EVENT_TASK      = 0x4000,
+    EVENT_SHUTDOWN  = 0x8000
 } type_event;
 
 struct sl_thread {
     struct list_head thread_list;
     pthread_t   thread_id;
-    unsigned int thread_status;             /* 线程状态 */
+    volatile unsigned int thread_status;             /* 线程状态 */
 };
 
 /*  
@@ -68,5 +69,6 @@ struct sl_thread_pool *sl_thread_pool_create(unsigned int core_td_num, unsigned 
 void sl_thread_pool_destory(struct sl_thread_pool *pool);
 void sl_thread_pool_destory_now(struct sl_thread_pool *pool);
 int sl_thread_pool_push_task(struct sl_thread_pool *pool, void *(*task_fun)(void *arg), void *arg);
+
 
 #endif

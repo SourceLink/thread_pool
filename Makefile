@@ -6,7 +6,7 @@ SRC 	+= $(wildcard *.h)
 
 
 $(TARGET):$(SRC)
-	$(CC) -o $@  ./src/sl_thread_pool.c -I ./src/ $^ -lpthread -Wall
+	$(CC) -o $@  ./src/sl_thread_pool.c ./src/sl_message_queue.c -I ./src/ $^ -lpthread -Wall -g
 
 .PHONY: clean 
 clean:

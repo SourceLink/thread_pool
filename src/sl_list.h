@@ -44,24 +44,24 @@ static __inline void list_head_init(struct list_head *list)
 
 
 /* 添加节点 */
-static __inline void __list_add(struct list_head *new, struct list_head *prev, struct list_head *next)
+static __inline void __list_add(struct list_head *new_head, struct list_head *prev, struct list_head *next)
 {
-	next->prev = new;
-	new->next = next;
-	new->prev = prev;
-	prev->next = new;
+	next->prev = new_head;
+	new_head->next = next;
+	new_head->prev = prev;
+	prev->next = new_head;
 }
 
 /* 新节点在head之后 */
-static __inline void list_add(struct list_head *head, struct list_head *new)
+static __inline void list_add(struct list_head *head, struct list_head *new_head)
 {
-	__list_add(new, head, head->next);
+	__list_add(new_head, head, head->next);
 }
 
 /* 新节点在head之前 */
-static __inline void list_add_tail(struct list_head *head, struct list_head *new)
+static __inline void list_add_tail(struct list_head *head, struct list_head *new_head)
 {
-	__list_add(new, head->prev, head);
+	__list_add(new_head, head->prev, head);
 }
 
 

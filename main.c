@@ -1,7 +1,8 @@
-#include "sl_thread_pool.h"
+#include "src/sl_thread_pool.h"
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 pthread_mutex_t work_mutex;
 
@@ -44,12 +45,14 @@ int main(int arg, char **argv)
         sl_thread_pool_push_task(creat_pool, fun1, NULL);
     }
 
-    sleep(5);
-    for (int i = 0; i < 3; i++) {
-        sl_thread_pool_push_task(creat_pool, fun1, NULL);
-    }
+    // sleep(5);
+    // for (int i = 0; i < 3; i++) {
+    //     sl_thread_pool_push_task(creat_pool, fun1, NULL);
+    // }
 
-    printf("time: ==========================\n");
+    // printf("time: ==============%s============\n", strchr(" \t", '  '));
+    char* end;
+    printf("time: ==============%ld============\n", strtol("0x0c006F", &end, 0));
     // // for (int i = 0; i < 3; i++) {
     // //     sl_thread_pool_push_task(creat_pool, fun1, NULL);
     // // }
@@ -66,7 +69,7 @@ int main(int arg, char **argv)
 
 
     // sl_thread_pool_destory(creat_pool);
-    sleep(50);
+    sleep(10);
 
     return 0;
 }
